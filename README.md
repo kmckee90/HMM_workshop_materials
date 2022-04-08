@@ -1,6 +1,6 @@
 # Hidden Markov Models Workshop scripts
 This is code for simulating data from Hidden Markov Models (HMM) and fitting HMMs in Stan.
-Currently, the most annotated scripts are model3_HMM_dataAnalysis and model3_HMM_dataSimulation, so for a conceptual walk-through, it is easiest to start with those. 
+Currently, the most annotated scripts are model3_HMM_dataAnalysis and model3_HMM_dataSimulation, so for a practicalwalk-through, it is easiest to start with those. 
 
 - model1 is the basic HMM. Transition probabilities are estimated for a set of simple logistic regression sub-models.
 - model2 introduces state prediction, such that the most likely sub-model can be conditioned on the covariates.
