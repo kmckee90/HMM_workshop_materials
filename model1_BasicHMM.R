@@ -7,12 +7,11 @@
 
 set.seed(123)
 # Set up parameters -------------------------------------------------------
-nState<-3
-nCov<-1
-time<-300
-b0<-c(-2, -2, 2)
-# b1<-matrix(rnorm(nState*nCov), nCov, nState)
-b1<-matrix(c(4,0,-4), nCov, nState)
+nState<-3  #Number of hidden states
+nCov<-1    #Number of covariates
+time<-300  #Observations per person; this model only fits data from a single person / series.
+b0<-c(-2, 0, 2) #Base response rates
+b1<-matrix(c(4,0,-4), nCov, nState) #Regressions on the covariate
 
 # Transition matrix -------------------------------------------------------
 A<-matrix(1, nState, nState)
@@ -20,20 +19,23 @@ diag(A)<-50
 A<-apply(A,2,function(u) u/sum(u))
 
 # Generate data -----------------------------------------------------------
-z<-matrix(1, ncol=1, nrow=time)                          #Decision state
-y<-p<-matrix(0, ncol=1, nrow=time)                       #Response
+z<-matrix(1, ncol=1, nrow=time)           #Decision state
+y<-p<-matrix(0, ncol=1, nrow=time)        #Response
 X<-matrix(rbinom(time*nCov, size=1, .5), ncol=nCov, nrow=time)   #Time varying covariate
 
 for(i in 2:time){
-  z[i]<-sample(1:nState, 1, p=A[,z[i-1]])
-  p[i]<-plogis(b0[z[i]]+ X[i,] %*% b1[,z[i]] )
-  y[i]<-rbinom(1,1,p[i])
+  z[i]<-sample(1:nState, 1, p=A[,z[i-1]])  # Draw a random hidden state index using the transition matrix and previous hidden state.
+  p[i]<-plogis(b0[z[i]]+ X[i,] %*% b1[,z[i]] ) #Compute response probabilities given that state.
+  y[i]<-rbinom(1,1,p[i]) #Generate responses from response probabilities
 }
 
-plot(z, type="o", col="blue", ylim=c(1,nState))
-lines(y+1, type="h", col="red")
-lines(X[,1]*.5+1, type="h", col="blue")
+#Plot hidden state and responses:
+plot(z, type="o", col="blue", ylim=c(1,nState)) #hidden state
+lines(y+1, type="h", col="red") #Response
+lines(X[,1]*.5+1, type="h", col="blue") #Covariate
 
+
+#Data object for Stan model later. These values are named within the stan model and provided externally as a list.
 stan_dat<-list(
   "K"=nState,
   "J"=nCov,
@@ -47,6 +49,8 @@ stan_dat<-list(
 # Stan model ---------------------------------------------------------------
 require(rstan)
 
+#Models are written in the Stan language, compiled, and run in R.
+
 model1.str<-
   "
 data { 
@@ -55,23 +59,23 @@ data {
   int T; // length of series
   int Y [T]; // response
   matrix[T, J] X; //covariate
-  vector[K] dprior [K];
+  vector[K] dprior [K]; //prior distribution for the transition matrix
 }
 parameters{
-  ordered[K] b0;
-  matrix[J,K] b1;
+  ordered[K] b0; // Base rates are constrained to an ordered vector to make sure the hidden states are ranked
+  matrix[J,K] b1; 
   simplex[K] A[K];  // transit probs
 }
 transformed parameters{
   real acc[K];
   real gamma[T, K];
   
-  //First point
+  //Likelihood of first point
   for (k in 1:K){
     gamma[1, k] = bernoulli_logit_lpmf(Y[1] | b0[k] + X[1,]*b1[,k]);
   }
   
-  //Series after first
+  //Likelihood of each successive point. 
   for (t in 2:T) {
     for (k in 1:K) {
        for (j in 1:K) {
@@ -89,35 +93,42 @@ model {
   }
   to_vector(b1) ~ normal(0.0, 2.0);
 
+
+  //Log-likelihoods are summed in 'target' for use in MCMC.
   target += log_sum_exp(gamma[T]);
 }
 
 generated quantities {
+ //Hidden state probabilities calculated post-hoc from the state likelihoods at each time.
   vector[K] alpha[T];
   for (t in 1:T)
     alpha[t] = softmax(to_vector(gamma[t]) );
 }
 "
 
-
+#Compile model
 model1<-stan_model(model_code=model1.str)
 
 
 # Optimization -------------------------------------------------------------------
-fit.opt<-optimizing(object=model1, data=stan_dat )
-# fit.opt<-optimizing(object=model1, data=stan_dat, init=as.list(fit.opt$par+rnorm(length(fit.opt$par))) )
+#Optimization uses gradient descent and is likely to converge to a local solution. 
+#Re-run multiple times and compare the likelihood of each run.
 
+fit.opt<-optimizing(object=model1, data=stan_dat )
+fit.opt$value
+
+#Compare base rates
 b0
 fit.opt$par[grep("b0",names(fit.opt$par))]
 
+#Compare regression coefficients
 b1
 matrix(fit.opt$par[grep("b1",names(fit.opt$par))],nCov, nState)
 
+#Transition matrix
 A
 matrix(fit.opt$par[grep("A",names(fit.opt$par))],nState, nState)
 
-
-z
 alpha<-matrix(fit.opt$par[grep("alpha",names(fit.opt$par))],nrow=time, ncol=3)
 
 par(mfrow=c(3,1),mai=c(.1,.5,.1,.1))
@@ -128,97 +139,74 @@ lines(alpha[,2], col="blue")
 plot(as.numeric(z==3), type="l", col="black")
 lines(alpha[,3], col="red")
 
-z.est<-apply(alpha,1,function(x)which(x==max(x)))
-plot(z, type="l")
-lines(z.est, col="red")
-
-
-
-
 
 # Sampling ----------------------------------------------------------------
+#Sampling uses Markov Chain Monte Carlo (MCMC) to obtain an approximation of the complete posterior distribution.
+#Hence it takes much longer, but provides more output information.
+
 fit.samp<-sampling(object=model1, data=stan_dat, 
                    chains=5, cores=5, warmup=300, iter=600,
                    control=list(max_treedepth=6, adapt_delta=.9),
                    include=F, pars=c("acc","gamma"))
-draws<-as.data.frame(fit.samp)
-
-hist(draws$lp__)
-
+draws<-extract(fit.samp)
 
 # Examine results ---------------------------------------------------------
+#Transition matrix parameters
 A
-matrix(colMeans(draws)[grep("A",colnames(draws))],nState, nState)
+colMeans(draws$A)
+pairs(draws$A, pch=".")
 
+
+#Regression parameter distributions:
 b0
-colMeans(draws)[grep("b0",colnames(draws))]
+colMeans(draws$b0)
+pairs(draws$b0, pch=".", cex=3)
 
 b1
-matrix(colMeans(draws)[grep("b1",colnames(draws))],nCov, nState)
+colMeans(draws$b1)
+pairs(draws$b1, pch=".", cex=3)
 
 
-hist(draws$`A[3,3]`)
-hist(draws$`b1[1,3]`)
-plot(draws[,1:3])
-
-alpha<-draws[grep("alpha",colnames(draws))]
-a1<-alpha[,1:time]
-a2<-alpha[,1:time+time]
-a3<-alpha[,1:time+time*2]
-
+#Extract and plot the hidden state probabilities
+alpha<-colMeans(draws$alpha)
 par(mfrow=c(3,1),mai=c(.1,.5,.1,.1))
 plot(as.numeric(z==1), type="l", col="black")
-lines(colMeans(a1), col="darkgreen")
+lines(alpha[,1], col="darkgreen")
 plot(as.numeric(z==2), type="l", col="black")
-lines(colMeans(a2), col="blue")
+lines(alpha[,2], col="blue")
 plot(as.numeric(z==3), type="l", col="black")
-lines(colMeans(a3), col="red")
-
-
-z.est<-apply(cbind(colMeans(a1),colMeans(a2),colMeans(a3)),1,function(x)which(x==max(x)))
-plot(z, type="l")
-lines(z.est, col="red")
-
+lines(alpha[,3], col="red")
 
 
 
 # Variational Bayes -------------------------------------------------------
+# This method is a combination of MCMC and optimization. It uses gradient descent to fit an approximate posterior distribution.
 fit.vb<-vb(object=model1, data=stan_dat) 
-draws<-as.data.frame(fit.vb)
+draws<-extract(fit.vb)
 
+# Examine results ---------------------------------------------------------
+#Transition matrix parameters
 A
-matrix(colMeans(draws)[grep("A",colnames(draws))],nState, nState)
+colMeans(draws$A)
+pairs(draws$A, pch=".")
 
+
+#Regression parameter distributions:
 b0
-colMeans(draws)[grep("b0",colnames(draws))]
+colMeans(draws$b0)
+pairs(draws$b0, pch=".", cex=3)
 
 b1
-matrix(colMeans(draws)[grep("b1",colnames(draws))],nCov, nState)
+colMeans(draws$b1)
+pairs(draws$b1, pch=".", cex=3)
 
 
-hist(draws$`A[3,3]`)
-hist(draws$`b0[1]`)
-plot(draws[,1:3])
-
-alpha<-draws[grep("alpha",colnames(draws))]
-a1<-alpha[,1:300]
-a2<-alpha[,301:600]
-a3<-alpha[,601:900]
-
+#Extract and plot the hidden state probabilities
+alpha<-colMeans(draws$alpha)
 par(mfrow=c(3,1),mai=c(.1,.5,.1,.1))
-plot(as.numeric(z==2), type="l", col="black")
-lines(colMeans(a1), col="darkgreen")
 plot(as.numeric(z==1), type="l", col="black")
-lines(colMeans(a2), col="blue")
+lines(alpha[,1], col="darkgreen")
+plot(as.numeric(z==2), type="l", col="black")
+lines(alpha[,2], col="blue")
 plot(as.numeric(z==3), type="l", col="black")
-lines(colMeans(a3), col="red")
-
-
-
-z.est<-apply(cbind(colMeans(a1),colMeans(a2),colMeans(a3)),1,function(x)which(x==max(x)))
-plot(z, type="l")
-lines(z.est, col="red")
-
-
-
-
+lines(alpha[,3], col="red")
